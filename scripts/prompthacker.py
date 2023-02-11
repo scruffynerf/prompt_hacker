@@ -14,6 +14,7 @@ from collections import namedtuple
 from random import randint, sample
 from ldm.modules.encoders.modules import FrozenCLIPEmbedder, FrozenOpenCLIPEmbedder
 import open_clip.tokenizer
+import re
 
 class VanillaClip:
     def __init__(self, clip):
@@ -52,14 +53,19 @@ class Script(scripts.Script):
     def ui(self, is_img2img):
         neg_pos = gr.Dropdown(label="Hack apart the negative or positive prompt", choices=["Positive","Negative"], value="Positive")
         hackfunction = gr.Dropdown(label="Function", choices=["Remove","Randomize","Shuffle","Strengthen or Weaken"], value="Remove")
+        lorasplacement = gr.Dropdown(label="Lora relocate", choices=["Front","Rear","Remove"], value="Remove")
+        ignorepunct = gr.Checkbox(label='Ignore items like ( ),.[ ]', value=True)
+        ignorenumbers = gr.Checkbox(label='Ignore numbers', value=True)
+        ignorecommon = gr.Checkbox(label="Ignore words like 'a' 'an' 'the' etc", value=False)
         skip_x_first = gr.Slider(minimum=0, maximum=32, step=1, label='Skip X first tokens', value=0)
         take_x_atonce = gr.Slider(minimum=1, maximum=32, step=1, label='Take X tokens at a time', value=1)
-        power = gr.Slider(minimum=-2, maximum=2, step=0.1, label='Stronger/Weaker value', value=1)
+        power = gr.Slider(minimum=0, maximum=2, step=0.1, label='Stronger or Weaker value', value=1)
+        powerneg = gr.Checkbox(label='negative Strength value', value=False)
         grid_option = gr.Radio(choices=list(self.grid_options_mapping.keys()), label='Grid generation', value=self.default_grid_opt)
         font_size = gr.Slider(minimum=12, maximum=64, step=1, label='Font size', value=32)
-        return [neg_pos,hackfunction,skip_x_first,take_x_atonce,power,grid_option,font_size]
+        return [neg_pos,hackfunction,ignorepunct,ignorecommon,ignorenumbers,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,lorasplacement]
 
-    def run(self,p,neg_pos,hackfunction,skip_x_first,take_x_atonce,power,grid_option,font_size):
+    def run(self,p,neg_pos,hackfunction,ignorepunct,ignorecommon,ignorenumbers,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,lorasplacement):
         def write_on_image(img, msg):
             ix,iy = img.size
             draw = ImageDraw.Draw(img)
@@ -90,7 +96,6 @@ class Script(scripts.Script):
 
         def tokenShuffle(x, *s):
             x[slice(*s)] = sample(x[slice(*s)], len(x[slice(*s)]))
-
 
         def tokenize(promptinput, input_is_ids=False):
             clip = shared.sd_model.cond_stage_model.wrapped
@@ -154,7 +159,7 @@ class Script(scripts.Script):
         initial_seed = p.seed
         vocab_size = vocabsize()
         if initial_seed == -1:
-            initial_seed = randint(1,9999999)
+            initial_seed = randint(1,99999999)
         if neg_pos == "Positive":
             initial_prompt =  p.prompt
             prompt = p.prompt
@@ -162,18 +167,51 @@ class Script(scripts.Script):
             initial_prompt =  p.negative_prompt
             prompt = p.negative_prompt
 
+        loras = ""
+        useloras = False
+        regex = r"([^<]*)(<.*?> )(.*)"
+        subst1 = "\\2"
+        result1 = re.sub(regex, subst1, prompt, 0, re.MULTILINE)
+        if result1:
+           print (result1)
+           loras = result1
+           useloras = True
+        if lorasplacement == "Remove":
+           useloras = False
+
+        regex = r"([^<]*)(<.*?> )(.*)"
+        subst2 = "\\1\\3"
+        result2= re.sub(regex, subst2, prompt, 0, re.MULTILINE)
+        if result2:
+           print (result2)
+           prompt = result2
+
         full_prompt, tokens = tokenize(prompt)
-        print("total images :", len(tokens))
+
+        commonlist = [320, 539, 593, 518, 550] # a of with the an 
+        if ignorecommon:
+           tokens = list(filter(lambda x: x not in commonlist, tokens))
+
+        punctlist = [267,7,8,269,281,263,264,10323]  # ,().: :-
+        if ignorepunct:
+           tokens = list(filter(lambda x: x not in punctlist, tokens))
+
+        numberlist = [268,270,271,272,273,274,275,276,277,278,279]  # -1234567890
+        if ignorenumbers:
+           tokens = list(filter(lambda x: x not in numberlist, tokens))
+
         first = True
 
         if hackfunction == "Shuffle" and take_x_atonce == 1:
            take_x_atonce = 2
 
+        if powerneg:
+           power = -power
+
         for g in reversed(range(len(tokens) +2 -take_x_atonce )):
             new_prompt = ""
             new_prompt2 = ""
             new_tokens = []
-            print(f"g={g}")
             f = g-1
             if f >= 0 and f < skip_x_first:
                 continue
@@ -188,16 +226,16 @@ class Script(scripts.Script):
                     image_caption = "No: " + image_caption
                 elif hackfunction == "Randomize":
                     new_tokens = tokens.copy()
-                    flimit = f+take_x_atonce
-                    if flimit > len(new_tokens)-1:
-                       flimit = len(new_tokens)-1
+                    flimit = f+take_x_atonce-1
+                    if flimit > len(new_tokens):
+                       flimit = len(new_tokens)
                     for x in range(f,flimit+1):
-                            random_token = str(randint(1,vocab_size))
-                            print(f"random:{random_token}")
+                            random_token = randint(1,vocab_size)
+                            #print(f"random:{random_token}")
                             new_tokens[x] = random_token
-                    random_tokens = new_tokens[f:flimit]
+                    random_tokens = new_tokens[f:flimit+1]
                     newtext,returned_new_tokens = tokenize(random_tokens,True)
-                    removed_tokens = tokens[f:flimit]
+                    removed_tokens = tokens[f:flimit+1]
                     oldtext,returned_removed_tokens = tokenize(removed_tokens,True)
                     image_caption = f"{oldtext}->\n{newtext}"
                     new_prompt,returned_token_ids = tokenize(new_tokens,True)
@@ -222,26 +260,17 @@ class Script(scripts.Script):
                     change_tokens = new_tokens[f:f+take_x_atonce]
                     newtext,returned_new_tokens = tokenize(change_tokens,True)
                     image_caption = f" ({newtext.rstrip(' ')}:{power}) "
-                    #new_tokens[f:f+take_x_atonce] = returned_new_tokens
                     new_prompt1,returned_token_ids = tokenize(new_tokens[:f],True)
                     new_prompt2,returned_token_ids = tokenize(new_tokens[f+take_x_atonce:],True)
                     new_prompt = new_prompt1 + image_caption + new_prompt2
-                #              new_prompt += image_caption + " "
-                #           new_tokens2 = new_tokens2 + str(tokens[x]) + ","
-                #        else:
-                #           if x == f and new_tokens != "":
-                #              new_prompt,starting_tokens = tokenize(new_tokens.rstrip(","),True)
-                #              new_prompt += " "
-                #           original_token += str(tokens[x]) + ","
-                #    if new_tokens2 != "":
-                #        new_prompt2,ending_tokens = tokenize(new_tokens2.rstrip(","),True)
-                #        new_prompt += new_prompt2
-                #    else:
-                #        originaltext,original_tokens = tokenize(original_token,True)
-                #        image_caption += f"({originaltext.rstrip(' ')}:{power})"
-                #~        new_prompt += image_caption
             else:
                 new_prompt = initial_prompt
+                useloras = False
+            if useloras:
+                if lorasplacement == "Rear":
+                   new_prompt += loras
+                if lorasplacement == "Front":
+                   new_prompt = loras + new_prompt
             print(f"{new_prompt}")
             if neg_pos == "Positive":
                 p.prompt = new_prompt
