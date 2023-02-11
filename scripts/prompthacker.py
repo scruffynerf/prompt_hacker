@@ -5,16 +5,18 @@
 
 from modules.shared import opts, cmd_opts, state
 from modules.processing import Processed, StableDiffusionProcessingImg2Img, process_images, images
+import modules.scripts as scripts
+from modules import script_callbacks, shared, sd_hijack
 from PIL import Image, ImageFont, ImageDraw, ImageOps
 from fonts.ttf import Roboto
-import modules.scripts as scripts
-from modules import script_callbacks, shared
 import gradio as gr
 from collections import namedtuple
 from random import randint, sample
 from ldm.modules.encoders.modules import FrozenCLIPEmbedder, FrozenOpenCLIPEmbedder
 import open_clip.tokenizer
 import re
+
+notreallytokens = ["0place"]
 
 class VanillaClip:
     def __init__(self, clip):
@@ -53,19 +55,19 @@ class Script(scripts.Script):
     def ui(self, is_img2img):
         neg_pos = gr.Dropdown(label="Hack apart the negative or positive prompt", choices=["Positive","Negative"], value="Positive")
         hackfunction = gr.Dropdown(label="Function", choices=["Remove","Randomize","Shuffle","Strengthen or Weaken"], value="Remove")
-        lorasplacement = gr.Dropdown(label="Lora relocate", choices=["Front","Rear","Remove"], value="Remove")
-        ignorepunct = gr.Checkbox(label='Ignore items like ( ),.[ ]', value=True)
-        ignorenumbers = gr.Checkbox(label='Ignore numbers', value=True)
-        ignorecommon = gr.Checkbox(label="Ignore words like 'a' 'an' 'the' etc", value=False)
-        skip_x_first = gr.Slider(minimum=0, maximum=32, step=1, label='Skip X first tokens', value=0)
+        magicwords = gr.Textbox(label="Special word handling (if not autorecognized)",lines=2,value="")
+        ignorepunct = gr.Checkbox(label='Ignore/remove items like commas or periods', value=True)
+        ignorecommon = gr.Checkbox(label="Ignore/remove  words like 'a' 'an' 'the' etc", value=False)
+        nosplitwords = gr.Checkbox(label='Keep complex words whole (versus split into 2+ tokens)', value=True)
+        skip_x_first = gr.Slider(minimum=0, maximum=32, step=1, label='Skip first X tokens', value=0)
         take_x_atonce = gr.Slider(minimum=1, maximum=32, step=1, label='Take X tokens at a time', value=1)
         power = gr.Slider(minimum=0, maximum=2, step=0.1, label='Stronger or Weaker value', value=1)
-        powerneg = gr.Checkbox(label='negative Strength value', value=False)
+        powerneg = gr.Checkbox(label='Negative Strength value', value=False)
         grid_option = gr.Radio(choices=list(self.grid_options_mapping.keys()), label='Grid generation', value=self.default_grid_opt)
         font_size = gr.Slider(minimum=12, maximum=64, step=1, label='Font size', value=32)
-        return [neg_pos,hackfunction,ignorepunct,ignorecommon,ignorenumbers,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,lorasplacement]
+        return [neg_pos,hackfunction,ignorepunct,ignorecommon,nosplitwords,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,magicwords]
 
-    def run(self,p,neg_pos,hackfunction,ignorepunct,ignorecommon,ignorenumbers,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,lorasplacement):
+    def run(self,p,neg_pos,hackfunction,ignorepunct,ignorecommon,nosplitwords,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,magicwords):
         def write_on_image(img, msg):
             ix,iy = img.size
             draw = ImageDraw.Draw(img)
@@ -97,7 +99,12 @@ class Script(scripts.Script):
         def tokenShuffle(x, *s):
             x[slice(*s)] = sample(x[slice(*s)], len(x[slice(*s)]))
 
+        def addnotreallytoken(word):
+            notreallytokens.append(word)
+            return (len(notreallytokens)-1)*-1 # returns the negative location of the word stored
+
         def tokenize(promptinput, input_is_ids=False):
+            tokens = []
             clip = shared.sd_model.cond_stage_model.wrapped
             if isinstance(clip, FrozenCLIPEmbedder):
                 clip = VanillaClip(shared.sd_model.cond_stage_model.wrapped)
@@ -107,10 +114,43 @@ class Script(scripts.Script):
                 raise RuntimeError(f'Unknown CLIP model: {type(clip).__name__}')
 
             if input_is_ids:
+                # if we've already got token ids, use em
                 tokens = promptinput
             else:
-                tokens = shared.sd_model.cond_stage_model.tokenize([promptinput])[0]
+                # the default of just trusting the tokenizer code doesn't support embeddings, loras, parens/brackets/weights and some trigger words.
+                splitintowords = promptinput.split(" ")
+                for thisword in splitintowords:
+                    commaonend = False
+                    if thisword.rstrip(",") != thisword and thisword != ",":
+                       # comma on the end
+                       commaonend = True
+                       thisword = thisword.rstrip(",")
+                    if thisword in sd_hijack.model_hijack.embedding_db.word_embeddings.keys():
+                        # this word is embedding
+                        tokens.append(addnotreallytoken(thisword))
+                    elif re.match("<.*>", thisword):
+                        # this word is a lora
+                        tokens.append(addnotreallytoken(thisword))
+                    elif re.match("\(.*\)", thisword):
+                        # this word is weighted
+                        tokens.append(addnotreallytoken(thisword))
+                    elif re.match("\[.*\]", thisword):
+                        # this word is weighted
+                        tokens.append(addnotreallytoken(thisword))
+                    elif thisword in magicwords.split(","):
+                        # this word is given to us to flag specially
+                        tokens.append(addnotreallytoken(thisword))
+                    else:
+                        # tokenize this
+                        thistoken = shared.sd_model.cond_stage_model.tokenize([thisword])[0]
+                        if nosplitwords and len(thistoken) > 1:
+                           tokens.append(addnotreallytoken(thisword))
+                        else:
+                           tokens.extend(thistoken)
+                    if commaonend:
+                        tokens.append(267)
 
+            #print(f"TOKENDEBUG {tokens}")
             vocab = {v: k for k, v in clip.vocab().items()}
             prompttext = ''
             ids = []
@@ -121,26 +161,29 @@ class Script(scripts.Script):
 
             def dump(last=False):
                 nonlocal prompttext, ids, current_ids
-                words = [vocab.get(x, "") for x in current_ids]
+                if len(current_ids) == 1 and current_ids[0] < 0:
+                    #special case word, negative of location in notreallytokens array
+                    word = notreallytokens[-current_ids[0]] + " "
+                else:
+                    words = [vocab.get(x, "") for x in current_ids]
+                    try:
+                        word = bytearray([byte_decoder[x] for x in ''.join(words)]).decode("utf-8")
+                    except UnicodeDecodeError:
+                        if last:
+                            word = "❌" * len(current_ids)
+                        elif len(current_ids) > 4:
+                            id = current_ids[0]
+                            ids += [id]
+                            local_ids = current_ids[1:]
+                            prompttext += "❌"
 
-                try:
-                    word = bytearray([byte_decoder[x] for x in ''.join(words)]).decode("utf-8")
-                except UnicodeDecodeError:
-                    if last:
-                        word = "❌" * len(current_ids)
-                    elif len(current_ids) > 4:
-                        id = current_ids[0]
-                        ids += [id]
-                        local_ids = current_ids[1:]
-                        prompttext += "❌"
-
-                        current_ids = []
-                        for id in local_ids:
-                            current_ids.append(id)
-                            dump()
+                            current_ids = []
+                            for id in local_ids:
+                                current_ids.append(id)
+                                dump()
+                                return
+                        else:
                             return
-                    else:
-                        return
 
                 word = word.replace("</w>", " ")
                 prompttext += word
@@ -167,38 +210,15 @@ class Script(scripts.Script):
             initial_prompt =  p.negative_prompt
             prompt = p.negative_prompt
 
-        loras = ""
-        useloras = False
-        regex = r"([^<]*)(<.*?> )(.*)"
-        subst1 = "\\2"
-        result1 = re.sub(regex, subst1, prompt, 0, re.MULTILINE)
-        if result1:
-           print (result1)
-           loras = result1
-           useloras = True
-        if lorasplacement == "Remove":
-           useloras = False
-
-        regex = r"([^<]*)(<.*?> )(.*)"
-        subst2 = "\\1\\3"
-        result2= re.sub(regex, subst2, prompt, 0, re.MULTILINE)
-        if result2:
-           print (result2)
-           prompt = result2
-
         full_prompt, tokens = tokenize(prompt)
 
-        commonlist = [320, 539, 593, 518, 550] # a of with the an 
+        commonlist = [320, 539, 593, 518, 550] # a of with the an
         if ignorecommon:
            tokens = list(filter(lambda x: x not in commonlist, tokens))
 
-        punctlist = [267,7,8,269,281,263,264,10323]  # ,().: :-
+        punctlist = [267,269,281]  # ,.:
         if ignorepunct:
            tokens = list(filter(lambda x: x not in punctlist, tokens))
-
-        numberlist = [268,270,271,272,273,274,275,276,277,278,279]  # -1234567890
-        if ignorenumbers:
-           tokens = list(filter(lambda x: x not in numberlist, tokens))
 
         first = True
 
@@ -223,7 +243,7 @@ class Script(scripts.Script):
                     new_prompt,returned_token_ids = tokenize(new_tokens,True)
                     removed_tokens = tokens[f:f+take_x_atonce]
                     image_caption,returned_removed_tokens = tokenize(removed_tokens,True)
-                    image_caption = "No: " + image_caption
+                    image_caption = "No " + image_caption
                 elif hackfunction == "Randomize":
                     new_tokens = tokens.copy()
                     flimit = f+take_x_atonce-1
@@ -237,7 +257,7 @@ class Script(scripts.Script):
                     newtext,returned_new_tokens = tokenize(random_tokens,True)
                     removed_tokens = tokens[f:flimit+1]
                     oldtext,returned_removed_tokens = tokenize(removed_tokens,True)
-                    image_caption = f"{oldtext}->\n{newtext}"
+                    image_caption = f"{oldtext}->{newtext}"
                     new_prompt,returned_token_ids = tokenize(new_tokens,True)
                 elif hackfunction == "Shuffle":
                     new_tokens = tokens.copy()
@@ -265,12 +285,6 @@ class Script(scripts.Script):
                     new_prompt = new_prompt1 + image_caption + new_prompt2
             else:
                 new_prompt = initial_prompt
-                useloras = False
-            if useloras:
-                if lorasplacement == "Rear":
-                   new_prompt += loras
-                if lorasplacement == "Front":
-                   new_prompt = loras + new_prompt
             print(f"{new_prompt}")
             if neg_pos == "Positive":
                 p.prompt = new_prompt
@@ -301,4 +315,3 @@ class Script(scripts.Script):
             if opts.grid_save or grid_flags.always_save_grid:
                 images.save_image(grid, p.outpath_grids, "grid", initial_seed, initial_prompt, opts.grid_format, info=proc.info, short_filename=not opts.grid_extended_filename, p=p, grid=True)
         return proc
-
