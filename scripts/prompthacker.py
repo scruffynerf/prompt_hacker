@@ -17,7 +17,7 @@ import open_clip.tokenizer
 import re
 
 notreallytokens = ["0place"]
-
+promptarchive = {}
 class VanillaClip:
     def __init__(self, clip):
         self.clip = clip
@@ -54,20 +54,22 @@ class Script(scripts.Script):
 
     def ui(self, is_img2img):
         neg_pos = gr.Dropdown(label="Hack apart the negative or positive prompt", choices=["Positive","Negative"], value="Positive")
-        hackfunction = gr.Dropdown(label="Function", choices=["Remove","Randomize","Shuffle","Strengthen or Weaken"], value="Remove")
-        magicwords = gr.Textbox(label="Special word handling (if not autorecognized)",lines=2,value="")
+        hackfunction = gr.Dropdown(label="Function", choices=["Remove","Randomize","Shuffle","Strengthen or Weaken","Before and After"], value="Remove")
+        magicwords = gr.Textbox(label="Special word handling (if not autorecognized)",lines=2,value="yourcustomword,yourcustomword2")
         ignorepunct = gr.Checkbox(label='Ignore/remove items like commas or periods', value=True)
         ignorecommon = gr.Checkbox(label="Ignore/remove  words like 'a' 'an' 'the' etc", value=False)
         nosplitwords = gr.Checkbox(label='Keep complex words whole (versus split into 2+ tokens)', value=True)
         skip_x_first = gr.Slider(minimum=0, maximum=32, step=1, label='Skip first X tokens', value=0)
         take_x_atonce = gr.Slider(minimum=1, maximum=32, step=1, label='Take X tokens at a time', value=1)
-        power = gr.Slider(minimum=0, maximum=2, step=0.1, label='Stronger or Weaker value', value=1)
+        bafunction = gr.Dropdown(label="Before/After options", choices=["","Adjacent Tokens","Randomize First","Randomize Second","Custom First", "Custom Second"], value="")
+        bawords = gr.Textbox(label="Before/After custom word",lines=1,value="")
+        power = gr.Slider(minimum=0, maximum=2, step=0.1, label='Stronger/Weaker or Before/After value', value=1)
         powerneg = gr.Checkbox(label='Negative Strength value', value=False)
         grid_option = gr.Radio(choices=list(self.grid_options_mapping.keys()), label='Grid generation', value=self.default_grid_opt)
         font_size = gr.Slider(minimum=12, maximum=64, step=1, label='Font size', value=32)
-        return [neg_pos,hackfunction,ignorepunct,ignorecommon,nosplitwords,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,magicwords]
+        return [neg_pos,hackfunction,ignorepunct,ignorecommon,nosplitwords,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,magicwords,bafunction,bawords]
 
-    def run(self,p,neg_pos,hackfunction,ignorepunct,ignorecommon,nosplitwords,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,magicwords):
+    def run(self,p,neg_pos,hackfunction,ignorepunct,ignorecommon,nosplitwords,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,magicwords,bafunction,bawords):
         def write_on_image(img, msg):
             ix,iy = img.size
             draw = ImageDraw.Draw(img)
@@ -225,6 +227,11 @@ class Script(scripts.Script):
         if hackfunction == "Shuffle" and take_x_atonce == 1:
            take_x_atonce = 2
 
+        if hackfunction == "Before and After" and bafunction == "":
+           bafunction = "Adjacent Tokens"
+        if hackfunction == "Before and After" and bafunction == "Adjacent Tokens":
+           take_x_atonce = 2
+
         if powerneg:
            power = -power
 
@@ -279,7 +286,36 @@ class Script(scripts.Script):
                     new_tokens = tokens.copy()
                     change_tokens = new_tokens[f:f+take_x_atonce]
                     newtext,returned_new_tokens = tokenize(change_tokens,True)
-                    image_caption = f" ({newtext.rstrip(' ')}:{power}) "
+                    # do we already have a weight we can change?
+                    if re.match(":[0-9\.-]+\)?>?", newtext):
+                       # yes, let's change that one instead of wrapping it
+                       image_caption = " " + re.sub(':[0-9.-]+', ':'+str(power), newtext) + " "
+                    else:
+                       image_caption = f" ({newtext.rstrip(' ')}:{power}) "
+                    new_prompt1,returned_token_ids = tokenize(new_tokens[:f],True)
+                    new_prompt2,returned_token_ids = tokenize(new_tokens[f+take_x_atonce:],True)
+                    new_prompt = new_prompt1 + image_caption + new_prompt2
+                elif hackfunction == "Before and After":
+                    image_caption = ""
+                    new_tokens = tokens.copy()
+                    change_tokens = new_tokens[f:f+take_x_atonce]
+                    newtext,returned_new_tokens = tokenize(change_tokens,True)
+                    if bafunction == "Adjacent Tokens":
+                       token0,returned_new_tokens = tokenize([change_tokens[0]],True)
+                       token1,returned_new_tokens = tokenize([change_tokens[1]],True)
+                       image_caption = " [" + token0.rstrip(" ") + ":" + token1.rstrip(" ") + ":" + str(power) + "] "
+                    elif bafunction == "Randomize First":
+                        random_token = randint(1,vocab_size)
+                        random_token_text,returned_new_tokens = tokenize([random_token],True)
+                        image_caption = " [" + random_token_text.rstrip(" ") + ":" + newtext.rstrip(" ") + ":" + str(power) + "] "
+                    elif bafunction == "Randomize Second":
+                        random_token = randint(1,vocab_size)
+                        random_token_text,returned_new_tokens = tokenize([random_token],True)
+                        image_caption = " [" + newtext.rstrip(" ") + ":" + random_token_text.rstrip(" ") + ":" + str(power) + "] "
+                    elif bafunction == "Custom First":
+                        image_caption = " [" + bawords.rstrip(" ") + ":" + newtext.rstrip(" ") + ":" + str(power) + "] "
+                    elif bafunction == "Custom Second":
+                        image_caption = " [" + newtext.rstrip(" ") + ":" + bawords.rstrip(" ") + ":" + str(power) + "] "
                     new_prompt1,returned_token_ids = tokenize(new_tokens[:f],True)
                     new_prompt2,returned_token_ids = tokenize(new_tokens[f+take_x_atonce:],True)
                     new_prompt = new_prompt1 + image_caption + new_prompt2
@@ -302,9 +338,8 @@ class Script(scripts.Script):
                 proc.images[0] = write_on_image(proc.images[0], image_caption)
             else:
                 proc.images[0] = write_on_image(proc.images[0], "Original Prompt")
-
             if opts.samples_save:
-                images.save_image(proc.images[0], p.outpath_samples, "", proc.seed, p.prompt, opts.samples_format, info= proc.info, p=p)
+                images.save_image(proc.images[0], p.outpath_samples, "", proc.seed, p.prompt, opts.samples_format, info=proc.infotexts[0], p=p)
 
         grid_flags = self.grid_options_mapping[grid_option]
         unwanted_grid_because_of_img_count = len(proc.images) < 2 and opts.grid_only_if_multiple
