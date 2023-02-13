@@ -1,9 +1,8 @@
-# a merge of concepts/code from 'test my prompt' and 'tokenizer'
-# to rip your prompt into small bits and then staple it back to together...
+# Inspired by (and started out using concepts/code from) 'Test My Prompt' and 'Tokenizer'
+# Purpose: to rip your prompt into small bits and then staple/tape/pound it back to together in new and interesting ways...
 #
-# authored by Scruffynerf  - msg me @Scruffy in Civitai discord
+# Authored by Scruffynerf  - msg me @Scruffy in the Civitai Discord
 
-from modules.shared import opts, cmd_opts, state
 from modules.processing import Processed, StableDiffusionProcessingImg2Img, process_images, images
 import modules.scripts as scripts
 from modules import script_callbacks, shared, sd_hijack
@@ -15,9 +14,8 @@ from random import randint, sample
 from ldm.modules.encoders.modules import FrozenCLIPEmbedder, FrozenOpenCLIPEmbedder
 import open_clip.tokenizer
 import re
+import random
 
-notreallytokens = ["0place"]
-promptarchive = {}
 class VanillaClip:
     def __init__(self, clip):
         self.clip = clip
@@ -53,23 +51,37 @@ class Script(scripts.Script):
         return "Prompt Hacker"
 
     def ui(self, is_img2img):
-        neg_pos = gr.Dropdown(label="Hack apart the negative or positive prompt", choices=["Positive","Negative"], value="Positive")
-        hackfunction = gr.Dropdown(label="Function", choices=["Remove","Randomize","Shuffle","Strengthen or Weaken","Before and After"], value="Remove")
-        magicwords = gr.Textbox(label="Special word handling (if not autorecognized)",lines=2,value="yourcustomword,yourcustomword2")
-        ignorepunct = gr.Checkbox(label='Ignore/remove items like commas or periods', value=True)
-        ignorecommon = gr.Checkbox(label="Ignore/remove  words like 'a' 'an' 'the' etc", value=False)
-        nosplitwords = gr.Checkbox(label='Keep complex words whole (versus split into 2+ tokens)', value=True)
-        skip_x_first = gr.Slider(minimum=0, maximum=32, step=1, label='Skip first X tokens', value=0)
-        take_x_atonce = gr.Slider(minimum=1, maximum=32, step=1, label='Take X tokens at a time', value=1)
-        bafunction = gr.Dropdown(label="Before/After options", choices=["","Adjacent Tokens","Randomize First","Randomize Second","Custom First", "Custom Second"], value="")
-        bawords = gr.Textbox(label="Before/After custom word",lines=1,value="")
-        power = gr.Slider(minimum=0, maximum=2, step=0.1, label='Stronger/Weaker or Before/After value', value=1)
-        powerneg = gr.Checkbox(label='Negative Strength value', value=False)
-        grid_option = gr.Radio(choices=list(self.grid_options_mapping.keys()), label='Grid generation', value=self.default_grid_opt)
-        font_size = gr.Slider(minimum=12, maximum=64, step=1, label='Font size', value=32)
-        return [neg_pos,hackfunction,ignorepunct,ignorecommon,nosplitwords,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,magicwords,bafunction,bawords]
+        with gr.Blocks():
+            with gr.Box():
+                neg_pos = gr.Dropdown(label="Hack apart the positive or negative prompt?", choices=["Positive","Negative"], value="Positive")
+            with gr.Row():
+                startat = gr.Slider(minimum=0, maximum=100, step=1, label='Start processing at % of prompt - 0%=start', value=0)
+                endat = gr.Slider(minimum=0, maximum=100, step=1, label='Finish processing at % of prompt - 100%=end', value=100)
+            with gr.Box():
+                take_x_atonce = gr.Slider(minimum=1, maximum=100, step=1, label='Process X words/tokens at a time, as a group', value=1)
+                nosplitwords = gr.Checkbox(label='Keep complex words whole (versus splitting into 2+ tokens)', value=True)
+                ignorepunct = gr.Checkbox(label='Ignore+Remove punctuation like commas or periods', value=True)
+                ignorecommon = gr.Checkbox(label="Ignore+Remove common words like 'a' 'an' 'the' etc", value=False)
+                magicwords = gr.Textbox(label="Special Word handling (if not autorecognized)",lines=1,value="yourcustomword,yourcustomword2")
+                customword = gr.Textbox(label="Custom word - when you want to force a word in",lines=1,value="")
+            # handle token removal functions, then token adding, then token replacement, then token reorganizing, then wrapping/weights
+            with gr.Box():
+                tokenremoval = gr.Dropdown(label="Word/Token removal",choices=["","Remove Word/Token/Group", "Remove First in Group", "Remove Last in Group"],value="")
+                tokenadding = gr.Dropdown(label="Word adding", choices=["TBD"],value="TBD")
+                tokenreplacement = gr.Dropdown(label="Word Replacement", choices=["","Change All to 1 Custom", "Change First to Custom", "Change Last to Custom", "Change All to 1 Random", "Change Each to Random", "Change First to Random", "Change Last to Random"], value="")
+                tokenrearrange = gr.Dropdown(label="Rearranging Words", choices=["","Shuffle All"],value="")
+            with gr.Box():
+                tokenreweight = gr.Dropdown(label="Weights and Transitions", choices=["","Before and After", "Change Weight"], value="")
+                with gr.Row():
+                    power = gr.Slider(minimum=0, maximum=2, step=0.1, label='Stronger/Weaker weight (0-2) or Before/After (0-1) value', value=1)
+                    powerneg = gr.Checkbox(label='make Negative value', value=False)
+            with gr.Box():
+                font_size = gr.Slider(minimum=12, maximum=64, step=1, label='Font size', value=32)
+                grid_option = gr.Radio(choices=list(self.grid_options_mapping.keys()), label='Grid generation', value=self.default_grid_opt)
+        return [neg_pos, startat, endat, take_x_atonce, nosplitwords, ignorepunct, ignorecommon, magicwords, customword, tokenremoval, tokenadding, tokenreplacement, tokenrearrange, tokenreweight, power, powerneg, font_size, grid_option]
 
-    def run(self,p,neg_pos,hackfunction,ignorepunct,ignorecommon,nosplitwords,skip_x_first,take_x_atonce,power,powerneg,grid_option,font_size,magicwords,bafunction,bawords):
+    def run(self, p, neg_pos, startat, endat, take_x_atonce, nosplitwords, ignorepunct, ignorecommon, magicwords, customword, tokenremoval, tokenadding, tokenreplacement, tokenrearrange, tokenreweight, power, powerneg, font_size, grid_option):
+
         def write_on_image(img, msg):
             ix,iy = img.size
             draw = ImageDraw.Draw(img)
@@ -94,12 +106,8 @@ class Script(scripts.Script):
                 clip = OpenClip(shared.sd_model.cond_stage_model.wrapped)
             else:
                 raise RuntimeError(f'Unknown CLIP model: {type(clip).__name__}')
-
             vocab = {v: k for k, v in clip.vocab().items()}
             return len(vocab)
-
-        def tokenShuffle(x, *s):
-            x[slice(*s)] = sample(x[slice(*s)], len(x[slice(*s)]))
 
         def addnotreallytoken(word):
             notreallytokens.append(word)
@@ -107,19 +115,12 @@ class Script(scripts.Script):
 
         def tokenize(promptinput, input_is_ids=False):
             tokens = []
-            clip = shared.sd_model.cond_stage_model.wrapped
-            if isinstance(clip, FrozenCLIPEmbedder):
-                clip = VanillaClip(shared.sd_model.cond_stage_model.wrapped)
-            elif isinstance(clip, FrozenOpenCLIPEmbedder):
-                clip = OpenClip(shared.sd_model.cond_stage_model.wrapped)
-            else:
-                raise RuntimeError(f'Unknown CLIP model: {type(clip).__name__}')
 
             if input_is_ids:
                 # if we've already got token ids, use em
                 tokens = promptinput
             else:
-                # the default of just trusting the tokenizer code doesn't support embeddings, loras, parens/brackets/weights and some trigger words.
+                # Just trusting the tokenizer code is no good, as it doesn't support embeddings, loras, parens/brackets/weights and some trigger words.
                 splitintowords = promptinput.split(" ")
                 for thisword in splitintowords:
                     commaonend = False
@@ -140,7 +141,7 @@ class Script(scripts.Script):
                         # this word is weighted
                         tokens.append(addnotreallytoken(thisword))
                     elif thisword in magicwords.split(","):
-                        # this word is given to us to flag specially
+                        # this word is given to us to flag specifically
                         tokens.append(addnotreallytoken(thisword))
                     else:
                         # tokenize this
@@ -153,13 +154,20 @@ class Script(scripts.Script):
                         tokens.append(267)
 
             #print(f"TOKENDEBUG {tokens}")
+
+            clip = shared.sd_model.cond_stage_model.wrapped
+            if isinstance(clip, FrozenCLIPEmbedder):
+                clip = VanillaClip(shared.sd_model.cond_stage_model.wrapped)
+            elif isinstance(clip, FrozenOpenCLIPEmbedder):
+                clip = OpenClip(shared.sd_model.cond_stage_model.wrapped)
+            else:
+                raise RuntimeError(f'Unknown CLIP model: {type(clip).__name__}')
             vocab = {v: k for k, v in clip.vocab().items()}
+            byte_decoder = clip.byte_decoder()
+
             prompttext = ''
             ids = []
             current_ids = []
-            class_index = 0
-
-            byte_decoder = clip.byte_decoder()
 
             def dump(last=False):
                 nonlocal prompttext, ids, current_ids
@@ -200,11 +208,12 @@ class Script(scripts.Script):
             dump(last=True)
             return prompttext, ids
 
-        p.do_not_save_samples = True
-        initial_seed = p.seed
-        vocab_size = vocabsize()
-        if initial_seed == -1:
-            initial_seed = randint(1,99999999)
+        # variable setup
+        notreallytokens = ["0placeholder"]
+
+        if p.seed == -1:
+            p.seed = randint(1,4294967295)
+
         if neg_pos == "Positive":
             initial_prompt =  p.prompt
             prompt = p.prompt
@@ -214,139 +223,231 @@ class Script(scripts.Script):
 
         full_prompt, tokens = tokenize(prompt)
 
+        # process the ignored items
         commonlist = [320, 539, 593, 518, 550] # a of with the an
         if ignorecommon:
-           tokens = list(filter(lambda x: x not in commonlist, tokens))
+            tokens = list(filter(lambda x: x not in commonlist, tokens))
 
         punctlist = [267,269,281]  # ,.:
         if ignorepunct:
-           tokens = list(filter(lambda x: x not in punctlist, tokens))
+            tokens = list(filter(lambda x: x not in punctlist, tokens))
 
-        first = True
+        # handle specific limitations or requirements of chosen functionality
 
-        if hackfunction == "Shuffle" and take_x_atonce == 1:
-           take_x_atonce = 2
+        if customword =="" or customword is None:
+            customword = "blank"
+        customword_id = addnotreallytoken(customword)
 
-        if hackfunction == "Before and After" and bafunction == "":
-           bafunction = "Adjacent Tokens"
-        if hackfunction == "Before and After" and bafunction == "Adjacent Tokens":
-           take_x_atonce = 2
+        if tokenrearrange == "Shuffle All" and take_x_atonce == 1:
+            take_x_atonce = 2  # no point in shuffling if only one token at a time, so force to 2 minimum
 
+        if tokenreweight == "Before and After":
+            take_x_atonce = 2 # before and after means 2 tokens are needed.
+            # if we add functions that change a single token into 2+, this will need to be revised
+
+        # checked the negative box, TODO, see if I can get negative slider values
         if powerneg:
-           power = -power
+            power = -power
 
-        for g in reversed(range(len(tokens) +2 -take_x_atonce )):
-            new_prompt = ""
-            new_prompt2 = ""
-            new_tokens = []
-            f = g-1
-            if f >= 0 and f < skip_x_first:
+        # what if you do nothing...
+        if tokenrearrange == "" and tokenreweight == "" and tokenreplacement == "" and tokenremoval == "":
+            # let's default to removal of the items
+            tokenremoval = "Remove Word/Token/Group"
+
+        tokenslength = len(tokens)
+        vocab_size = vocabsize()
+
+        if take_x_atonce > tokenslength:
+            take_x_atonce = tokenslength
+
+        #startat and endat are 0-100 %, so we divide by 100, and then round result
+        if startat >= endat: # don't do this, if so, ignore it entirely
+            startat = 0
+            endat = 100
+        starttoken = round(tokenslength * startat / 100)  # so 0% = length * zero or token 0
+        endtoken = round(tokenslength * endat / 100)  # so 100% = length * 1 or full tokenlength  (since range is always end-1, this is fine)
+
+        p.do_not_save_samples = True
+
+        # first generate the potentially 'cleaned' prompt (which may or may not be different from the original), and label, and setup things to add new images afterward
+        clean_prompt,clean_token_ids = tokenize(tokens,True)
+        print(f"\n{clean_prompt}")
+
+        if neg_pos == "Positive":
+            p.prompt = clean_prompt
+        else:
+            p.negative_prompt = clean_prompt
+
+        proc = process_images(p)
+        proc.images[0] = write_on_image(proc.images[0], "Cleaned Prompt")
+        if shared.opts.samples_save:
+            images.save_image(proc.images[0], p.outpath_samples, "", proc.seed, p.prompt, shared.opts.samples_format, info=proc.infotexts[0], p=p)
+
+        # loop to process prompt changes, and generate an image for each prompt.
+
+        for g in range(endtoken):  # loops from zero to 1 less than end token, ie every token 0 thru last desired token
+
+            #items to reset each loop
+            new_tokens = tokens.copy()
+
+            if g < starttoken: # if we are skipping from the start
                 continue
-            if f >= 0 and f > (len(tokens) - take_x_atonce):
-                continue
-            if f >= 0:
-                if hackfunction == "Remove":
-                    new_tokens = tokens[:f] + tokens[f+take_x_atonce:]
-                    new_prompt,returned_token_ids = tokenize(new_tokens,True)
-                    removed_tokens = tokens[f:f+take_x_atonce]
-                    image_caption,returned_removed_tokens = tokenize(removed_tokens,True)
-                    image_caption = "No " + image_caption
-                elif hackfunction == "Randomize":
-                    new_tokens = tokens.copy()
-                    flimit = f+take_x_atonce-1
-                    if flimit > len(new_tokens):
-                       flimit = len(new_tokens)
-                    for x in range(f,flimit+1):
-                            random_token = randint(1,vocab_size)
-                            #print(f"random:{random_token}")
-                            new_tokens[x] = random_token
-                    random_tokens = new_tokens[f:flimit+1]
-                    newtext,returned_new_tokens = tokenize(random_tokens,True)
-                    removed_tokens = tokens[f:flimit+1]
-                    oldtext,returned_removed_tokens = tokenize(removed_tokens,True)
-                    image_caption = f"{oldtext}->{newtext}"
-                    new_prompt,returned_token_ids = tokenize(new_tokens,True)
-                elif hackfunction == "Shuffle":
-                    new_tokens = tokens.copy()
-                    shufcount = 0
-                    original_ordered_tokens = tokens[f+1:f+take_x_atonce+1]
-                    while shufcount < 5:
-                        tokenShuffle(new_tokens,f+1,f+take_x_atonce+1)
-                        reordered_tokens = new_tokens[f+1:f+take_x_atonce+1]
-                        if reordered_tokens == original_ordered_tokens:
-                           shufcount += 1
-                        else:
-                           shufcount = 5
-                    newtext,returned_new_tokens = tokenize(reordered_tokens,True)
-                    removed_tokens = tokens[f+1:f+take_x_atonce+1]
-                    oldtext,returned_removed_tokens = tokenize(removed_tokens,True)
-                    image_caption = f"{oldtext}->\n{newtext}"
-                    new_prompt,returned_token_ids = tokenize(new_tokens,True)
-                elif hackfunction == "Strengthen or Weaken":
-                    new_tokens = tokens.copy()
-                    change_tokens = new_tokens[f:f+take_x_atonce]
-                    newtext,returned_new_tokens = tokenize(change_tokens,True)
-                    # do we already have a weight we can change?
-                    if re.match(":[0-9\.-]+\)?>?", newtext):
-                       # yes, let's change that one instead of wrapping it
-                       image_caption = " " + re.sub(':[0-9.-]+', ':'+str(power), newtext) + " "
-                    else:
-                       image_caption = f" ({newtext.rstrip(' ')}:{power}) "
-                    new_prompt1,returned_token_ids = tokenize(new_tokens[:f],True)
-                    new_prompt2,returned_token_ids = tokenize(new_tokens[f+take_x_atonce:],True)
-                    new_prompt = new_prompt1 + image_caption + new_prompt2
-                elif hackfunction == "Before and After":
-                    image_caption = ""
-                    new_tokens = tokens.copy()
-                    change_tokens = new_tokens[f:f+take_x_atonce]
-                    newtext,returned_new_tokens = tokenize(change_tokens,True)
-                    if bafunction == "Adjacent Tokens":
-                       token0,returned_new_tokens = tokenize([change_tokens[0]],True)
-                       token1,returned_new_tokens = tokenize([change_tokens[1]],True)
-                       image_caption = " [" + token0.rstrip(" ") + ":" + token1.rstrip(" ") + ":" + str(power) + "] "
-                    elif bafunction == "Randomize First":
-                        random_token = randint(1,vocab_size)
-                        random_token_text,returned_new_tokens = tokenize([random_token],True)
-                        image_caption = " [" + random_token_text.rstrip(" ") + ":" + newtext.rstrip(" ") + ":" + str(power) + "] "
-                    elif bafunction == "Randomize Second":
-                        random_token = randint(1,vocab_size)
-                        random_token_text,returned_new_tokens = tokenize([random_token],True)
-                        image_caption = " [" + newtext.rstrip(" ") + ":" + random_token_text.rstrip(" ") + ":" + str(power) + "] "
-                    elif bafunction == "Custom First":
-                        image_caption = " [" + bawords.rstrip(" ") + ":" + newtext.rstrip(" ") + ":" + str(power) + "] "
-                    elif bafunction == "Custom Second":
-                        image_caption = " [" + newtext.rstrip(" ") + ":" + bawords.rstrip(" ") + ":" + str(power) + "] "
-                    new_prompt1,returned_token_ids = tokenize(new_tokens[:f],True)
-                    new_prompt2,returned_token_ids = tokenize(new_tokens[f+take_x_atonce:],True)
-                    new_prompt = new_prompt1 + image_caption + new_prompt2
-            else:
-                new_prompt = initial_prompt
-            print(f"{new_prompt}")
+            if g > (endtoken - take_x_atonce):  # avoid grabbing last tokens if we're grouping, and not enough are left to grab a full set
+                break
+
+            #process the rest of the prompt, except for the piece under question:
+            working_preprompt,returned_pretoken_ids = tokenize(new_tokens[:g],True)
+            working_postprompt,returned_posttoken_ids = tokenize(new_tokens[g+take_x_atonce:],True)
+
+            # get the tokens in question:
+            working_tokens = new_tokens[g:g+take_x_atonce]
+            original_prompt, working_tokens = tokenize(working_tokens,True)
+            working_prompt = original_prompt
+
+            # process all functions desired, this can now be more than one...
+
+            # handle token removal functions, then token adding, then token replacement, then token reorganizing, then wrapping/weights
+            # this order should make the most sense...
+
+            # functions that reduce tokens to just one
+
+            if tokenreplacement == "Change All to 1 Custom": # Replace group with just 1 custom word
+                working_prompt,working_tokens = tokenize([customword_id],True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            if tokenreplacement == "Change All to 1 Random":  # Replace group Randomly with just 1
+                working_tokens = [randint(1,vocab_size)]
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            # potentially changes token counts, either up or down...
+            if tokenremoval == "Remove One or More of a Group": # Remove one or more of group
+                #todo
+                pass
+
+            if tokenremoval == "Remove First in Group": # Remove first of group
+                working_tokens.pop(0)
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            if tokenremoval == "Remove Last in Group": # Remove last of group
+                working_tokens.pop()
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            # partial token replacement, leaves token count intact...
+            if tokenreplacement == "Change First to Custom": # Replace first in group with custom word
+                working_tokens[0] = customword_id
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            if tokenreplacement == "Change Last to Custom": # Replace last in group with custom word
+                working_tokens[-1] = customword_id
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            if tokenreplacement == "Change First to Random": # Replace First Randomly in group
+                random_token = randint(1,vocab_size)
+                working_tokens[0] = random_token
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            if tokenreplacement == "Change Last to Random": # Replace Last Randomly in group
+                random_token = randint(1,vocab_size)
+                working_tokens[-1] = random_token
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            if tokenreplacement == "Change Each to Random": # Replace each Randomly in group
+                for x in range(len(working_tokens)):
+                    random_token = randint(1,vocab_size)
+                    working_tokens[x] = random_token
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            # rearrange token order functions
+
+            if tokenrearrange == "Shuffle All": # Shuffle group
+                shufcount = 0
+                original_tokens_order = working_tokens.copy()
+                while shufcount < 5:  # if 5 mixes fail to find a different order than the input, move on... to handle poor shuffling of small amount of tokens
+                    random.shuffle(working_tokens)
+                    if working_tokens != original_tokens_order:
+                        shufcount = 5
+                    shufcount += 1
+                working_prompt,working_tokens = tokenize(working_tokens,True)
+                image_caption = f"{original_prompt}->\n{working_prompt}"
+
+            # functions that add wrapping items like weights/etc
+
+            if tokenreweight == "Before and After" and len(working_tokens) == 2: # Before and After
+                token0,returned_token_id = tokenize([working_tokens[0]],True)
+                token1,returned_token_id = tokenize([working_tokens[1]],True)
+                working_prompt = "[" + token0.rstrip(" ") + ":" + token1.rstrip(" ") + ":" + str(power) + "] "
+                image_caption = working_prompt
+                # this really isn't conductive to further manipulation so it should be one of the last functions
+
+            if tokenreweight == "Change Weight": # Strengthen or Weaken
+                # do we already have a weight already we can change?
+                if re.search(r":[0-9\.-]+", working_prompt):  # TODO do not changing bracketed weights, only parens or carets
+                   # yes, let's change that one instead of wrapping it with a new one
+                   working_prompt = re.sub(r":[0-9\.-]+", ':'+str(power), working_prompt)
+                   # potentially this mean a group won't get a weight if one part is already weighted TODO fix
+                else:
+                   # no weight in current piece so wrap it all with a weight
+                   working_prompt = f"({working_prompt.rstrip(' ')}:{power}) "
+                # this really isn't very conductive to further manipulation so it should be one of the last functions
+                image_caption = working_prompt
+
+            # the nuclear option - remove entire section in question, no matter was done above, this will just wipe it out.
+            if tokenremoval == "Remove Word/Token/Group": # Remove all of group
+                image_caption = "No " + working_prompt
+                working_prompt = ""
+                # this really isn't conductive to any further manipulation so it should be the last function.  Boom.
+
+            # put things back together, new_preprompt + working_prompt + new_postprompt
+            new_prompt = working_preprompt + working_prompt + working_postprompt
+
+            # this puts the prompt up before the generation, useful for console watching
+            print(f"\n{new_prompt}")
+
             if neg_pos == "Positive":
                 p.prompt = new_prompt
             else:
                 p.negative_prompt = new_prompt
-            p.seed = initial_seed
-            if first:
-                proc = process_images(p)
-                first = False
-            else:
-                appendimages = process_images(p)
-                proc.images.insert(0,appendimages.images[0])
-                proc.infotexts.insert(0,appendimages.infotexts[0])
-            if f >= 0:
-                proc.images[0] = write_on_image(proc.images[0], image_caption)
-            else:
-                proc.images[0] = write_on_image(proc.images[0], "Original Prompt")
-            if opts.samples_save:
-                images.save_image(proc.images[0], p.outpath_samples, "", proc.seed, p.prompt, opts.samples_format, info=proc.infotexts[0], p=p)
 
+            appendimages = process_images(p)
+            proc.images.append(appendimages.images[0])
+            proc.infotexts.append(appendimages.infotexts[0])
+            proc.images[-1] = write_on_image(proc.images[-1], image_caption)
+            if shared.opts.samples_save:
+                images.save_image(proc.images[-1], p.outpath_samples, "", proc.seed, p.prompt, shared.opts.samples_format, info=proc.infotexts[-1], p=p)
+        # loop end
+
+        # generate the original prompt as given, and label, this way the final result is the prompt is recorded as identical to the original given, and restore works correctly.
+        # otherwise, the last prompt, no matter how mangled would be the recorded one, undesired.
+        print(f"\n{initial_prompt}")
+
+        if neg_pos == "Positive":
+            p.prompt = initial_prompt
+        else:
+            p.negative_prompt = initial_prompt
+
+        appendimages = process_images(p)
+        proc.images.append(appendimages.images[0])
+        proc.infotexts.append(appendimages.infotexts[0])
+        proc.images[-1] = write_on_image(proc.images[-1], "Original Prompt")
+        if shared.opts.samples_save:
+            images.save_image(proc.images[-1], p.outpath_samples, "", proc.seed, p.prompt, shared.opts.samples_format, info=proc.infotexts[-1], p=p)
+
+        # make grid, if desired, since all images are generated
         grid_flags = self.grid_options_mapping[grid_option]
-        unwanted_grid_because_of_img_count = len(proc.images) < 2 and opts.grid_only_if_multiple
-        if ((opts.return_grid or opts.grid_save) and not p.do_not_save_grid and not grid_flags.never_grid and not unwanted_grid_because_of_img_count) or grid_flags.always_grid:
+        unwanted_grid_because_of_img_count = len(proc.images) < 2 and shared.opts.grid_only_if_multiple
+        if ((shared.opts.return_grid or shared.opts.grid_save) and not p.do_not_save_grid and not grid_flags.never_grid and not unwanted_grid_because_of_img_count) or grid_flags.always_grid:
             grid = images.image_grid(proc.images)
             proc.images.insert(0,grid)
-            proc.infotexts.insert(0, proc.infotexts[-1])
-            if opts.grid_save or grid_flags.always_save_grid:
-                images.save_image(grid, p.outpath_grids, "grid", initial_seed, initial_prompt, opts.grid_format, info=proc.info, short_filename=not opts.grid_extended_filename, p=p, grid=True)
+            proc.infotexts.insert(0, proc.infotexts[0])
+            if shared.opts.grid_save or grid_flags.always_save_grid:
+                images.save_image(grid, p.outpath_grids, "grid", p.seed, p.prompt, shared.opts.grid_format, info=proc.info, short_filename=not shared.opts.grid_extended_filename, p=p, grid=True)
+
         return proc
